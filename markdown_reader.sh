@@ -17,10 +17,13 @@ Key strengths:
 6. Replaces horizontal rule indicators with a visual line.
 
 Capacities:
-- Removes <br>, <code> and <pre> tags.
+- Interpret and Remove HTML tags.
 - Handles different Markdown syntaxes efficiently.
 - Generates a clean and colorful terminal output.
 DOCUMENTATION
+
+# Capture Ctrl+C and end children processes
+trap 'kill -- -$$; clear; exit 1' SIGINT SIGHUP SIGQUIT SIGABRT SIGALRM
 
 # Color definitions with fallback for TTY sessions
 if [[ "${XDG_SESSION_TYPE}" != [Tt][Tt][Yy] ]]; then
@@ -61,6 +64,7 @@ fi
 
 readonly RED='\033[1;31m'                                               # Red color
 readonly YELLOW='\033[1;33m'                                            # Yellow color
+readonly UNDERLINE='\033[1;4;38;5;187m'                                 # Underline
 readonly COLOR_RESET='\033[0m'                                          # Reset color
 
 declare -A MESSAGES
@@ -79,9 +83,10 @@ Leitor de Markdown - Um analisador e formatador de Markdown completo
 Uso: ${0##*/} [OPÇÕES] arquivo
 
 Opções:
--h, --help      Exibir esta mensagem de ajuda
--nl, --no-less  Desativar o modo de paginação com less
--nh, --no-hl    Desativar realce de sintaxe para blocos de código
+-h, --help             Exibir esta mensagem de ajuda
+-nl, --no-less         Desativar o modo de paginação com less
+-nh, --no-hl           Desativar realce de sintaxe para blocos de código
+-ic, --invert-color    Ativa a inversão de cores
 
 Exemplos:
 ${0##*/} documento.md
@@ -94,6 +99,7 @@ Recursos do Markdown suportados:
 • Listas não ordenadas
 • Regras horizontais
 • Quebras de linha em HTML
+• HTML underline e mais
 EOF
             )
         )
@@ -109,9 +115,10 @@ Lector de Markdown - Un analizador y formateador de Markdown completo
 Uso: ${0##*/} [OPCIONES] archivo
 
 Opciones:
--h, --help      Mostrar este mensaje de ayuda
--nl, --no-less  Desactivar el modo de paginación con less
--nh, --no-hl    Desactivar resaltado de sintaxis para bloques de código
+-h, --help             Mostrar este mensaje de ayuda
+-nl, --no-less         Desactivar el modo de paginación con less
+-nh, --no-hl           Desactivar resaltado de sintaxis para bloques de código
+-ic, --invert-color    Activa la inversión de colores
 
 Ejemplos:
 ${0##*/} documento.md
@@ -124,6 +131,7 @@ Características de Markdown compatibles:
 • Listas no ordenadas
 • Reglas horizontales
 • Saltos de línea en HTML
+• Subrayado en HTML y más
 EOF
             )
         )
@@ -139,9 +147,10 @@ Markdown Reader - A comprehensive markdown parser and formatter
 Usage: ${0##*/} [OPTIONS] file
 
 Options:
--h, --help      Show this help message
--nl, --no-less  Disable pager mode with less
--nh, --no-hl    Disable syntax highlighting for code blocks
+-h, --help             Show this help message
+-nl, --no-less         Disable pager mode with less
+-nh, --no-hl           Disable syntax highlighting for code blocks
+-ic, --invert-color    Enables color inversion
 
 Examples:
 ${0##*/} document.md
@@ -154,6 +163,7 @@ Supported Markdown Features:
 • Unordered lists
 • Horizontal rules
 • HTML line breaks
+• HTML underline and more
 EOF
             )
         )
@@ -163,10 +173,15 @@ EOF
 
 # Check for required dependencies
 check_dependencies() {
+    local os=$(uname -o)
     local missing_deps=()
+    local count=0
     for cmd in source-highlight less; do
         if ! command -v "$cmd" &> /dev/null; then
             missing_deps+=("$cmd")
+            [[ ${missing_deps[count]} == "source-highlight" ]] && [[ -n "$TERMUX_VERSION" ]] && \
+            [[ "$os" =~ "Android" ]] && unset 'missing_deps[-1]' && export NO_HIGHLIGHT=1
+            ((count++)) || true
         fi
     done
     
@@ -239,6 +254,15 @@ show_help() {
     exit 0
 }
 
+# 🎯 When a command like 'less' is called directly in the script, it can become the foreground process, 
+# making it harder for the 'trap' to control it. However, when the command is inside a function, 
+# the script maintains the correct process hierarchy, allowing the 'trap' to control everything with 'pkill -P $$' or 'kill -- -$$'.
+pid_less() {
+    less "$@" &
+    LESS_PID=$!
+    wait $LESS_PID
+}
+
 # Process the markdown file
 process_markdown() {
     local input_file="$1"
@@ -246,8 +270,8 @@ process_markdown() {
     local code_block_content=""
     local code_block_lang=""
 
-    [[ -z $NO_LESS ]] && pipe='less -R -i'
-    [[ -n $NO_LESS ]] && pipe='cat'
+    [[ "$NO_LESS" != 1 ]] && pipe='pid_less -R -i'
+    [[ "$NO_LESS" == 1 ]] && pipe='cat'
     read -r -a cmd <<< "$pipe"
     
     # Check if file exists
@@ -259,11 +283,27 @@ process_markdown() {
     
     # Read and process the markdown file line by line
     while IFS= read -r line || [ -n "$line" ]; do
+
+        # Italic HTML tag
+        if [[ "$line" =~ \<i\>([^<]+)\<\/i\> ]]; then #[[ "$line" =~ \<i\>.*\<\/i\> ]] || 
+            detect_first_color
+            line=$(echo -e "$line" | awk -v highlight="${COLOR_BULLET}" -v reset="${first_color}" '{gsub(/<i>([^<]*)<\/i>/, "<i>" highlight "&" reset "</i>")}1')
+        elif [[ "$line" =~ \<em\>([^<]+)\<\/em\> ]]; then #[[ "$line" =~ \<em\>.*\<\/em\> ]] ||
+            detect_first_color
+            line=$(echo -e "$line" | awk -v highlight="${COLOR_BULLET}" -v reset="${first_color}" '{gsub(/<em>([^<]*)<\/em>/, "<em>" highlight "&" reset "</em>")}1')
+        fi
+
+        # Underline HTML tag
+        if [[ "$line" =~ \<u\>([^<]+)\<\/u\> ]]; then #[[ "$line" =~ \<u\>.*\<\/u\> ]] ||
+            detect_first_color
+            line=$(echo -e "$line" | awk -v highlight="${UNDERLINE}" -v reset="${first_color}" '{gsub(/<u>([^<]*)<\/u>/, "<u>" highlight "&" reset "</u>")}1')
+        fi
+
         # Remove HTML tags
         if [[ "$line" =~ \*\*\<[^*]+\>\*\* ]] || [[ "$line" =~ \"\<[^*]+\>\" ]] || [[ "$line" =~ \'\<[^*]+\>\' ]] || [[ "$line" =~ \`\<[^*]+\>\` ]]; then
             true
-        else
-            line=$(echo "$line" | sed 's/<[^>]*>//g')
+        elif [[ "$line" =~ (.*)\<[^*]+\>(.*) ]]; then
+            line=$(echo -e "$line" | sed 's/<[^>]*>//g')
             # line="${line//<br>/}"
             # line="${line//<\/br>/}"
         fi
@@ -333,7 +373,7 @@ process_markdown() {
         fi
 
         # Handle Inline Code
-        if [[ "$line" =~ \*([^*]+).\* ]] || [[ "$line" =~ \*.([^*]+).\* ]] || [[ "$line" =~ \*.([^*]+)\* ]]; then
+        if [[ "$line" =~ \*([^*]+)\.\* ]] || [[ "$line" =~ \*\.([^*]+)\.\* ]] || [[ "$line" =~ \*\.([^*]+)\* ]]; then
             true
         elif [[ "$line" =~ \*([^*]+)\* ]]; then
             detect_first_color
@@ -396,8 +436,8 @@ process_markdown() {
 # Main function
 main() {
     local MARKDOWN_FILE=""
-    export NO_HIGHLIGHT=""
-    export NO_LESS=""
+    export NO_HIGHLIGHT=${NO_HIGHLIGHT:-""}
+    export NO_LESS
     
     # Parse command line options
     while [[ $# -gt 0 ]]; do
@@ -406,7 +446,12 @@ main() {
                 show_help
                 ;;
             -nl|--no-less)
-                NO_LESS=1
+                NO_LESS=${NO_LESS:-1}
+                shift
+                ;;
+            -ic|--invert-color)
+                export LESS='-p .*'
+                NO_LESS=0
                 shift
                 ;;
             -nh|--no-hl)
