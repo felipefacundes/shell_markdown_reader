@@ -88,16 +88,15 @@ define_colors() {
     readonly COLOR_RESET='\033[0m'                                          # Reset color
 }
 
-
 # Check the system language and assign messages accordingly
+declare -A MESSAGES
 update_variables() {
-    declare -A MESSAGES
-
     if [[ "${LANG,,}" =~ pt_ ]]; then
         MESSAGES=(
             ["please_install"]="${RED}Erro: Dependências ausentes: ${YELLOW}${missing_deps[*]}\n${RED}Por favor, instale os pacotes necessários e tente novamente.${COLOR_RESET}"
             ["not_found"]="${RED}Arquivo não encontrado: ${input_file}${COLOR_RESET}\n"
             ["no_input"]="${RED}Erro: Nenhum arquivo de entrada especificado${COLOR_RESET}\n"
+			["and"]="${YELLOW}e"
             ["help"]=$(
         cat << EOF
 Leitor de Markdown - Um analisador e formatador de Markdown completo
@@ -133,6 +132,7 @@ EOF
             ["please_install"]="${RED}Error: Dependencias faltantes: ${YELLOW}${missing_deps[*]}\n${RED}Por favor, instala los paquetes necesarios e inténtalo de nuevo.${COLOR_RESET}"
             ["not_found"]="${RED}Archivo no encontrado: ${input_file}${COLOR_RESET}\n"
             ["no_input"]="${RED}Error: Ningún archivo de entrada especificado${COLOR_RESET}\n"
+			["and"]="${YELLOW}y"
             ["help"]=$(
         cat << EOF
 Lector de Markdown - Un analizador y formateador de Markdown completo
@@ -168,6 +168,7 @@ EOF
             ["please_install"]="${RED}Error: Missing dependencies: ${YELLOW}${missing_deps[*]}\n${RED}Please install the required packages and try again.${COLOR_RESET}"
             ["not_found"]="${RED}File not found: $input_file${COLOR_RESET}\n"
             ["no_input"]="${RED}Error: No input file specified${COLOR_RESET}\n"
+			["and"]="${YELLOW}and"
             ["help"]=$(
         cat << EOF
 Markdown Reader - A complete Markdown parser and formatter
@@ -201,20 +202,41 @@ EOF
     fi
 }
 
+cmd_check() {
+    if ! command -v "$1" 1>/dev/null && no_cmd+=("$1"); then
+		[[ "${#no_cmd[*]}" -gt 1 ]] && missing_deps=$(echo "${no_cmd[*]}" | awk 'BEGIN {first=1} {for (i=1; i<=NF; i++) \
+		{if (first) {printf "%s", $i; first=0} else {printf " or %s", $i}}} END {print ""}') || missing_deps="${no_cmd[*]}"
+		return 1
+	else
+	 	return 0
+	fi
+}
+
+_no_cmd() {
+	cmd_check highlight
+	cmd_check bat
+	cmd_check source-highlight
+	cmd_check pygmentize
+	if [ ${#no_cmd[@]} -ge 4 ]; then
+		return 1
+	fi
+	missing_deps=()
+	return 0
+}
 
 # Check for required dependencies
 check_dependencies() {
-    local os=$(uname -o)
-    local missing_deps=()
-    local count=0
-    for cmd in source-highlight less; do
-        if ! command -v "$cmd" &> /dev/null; then
-            missing_deps+=("$cmd")
-            [[ ${missing_deps[count]} == "source-highlight" ]] && [[ -n "$TERMUX_VERSION" ]] && \
-            [[ "$os" =~ "Android" ]] && unset 'missing_deps[-1]' && export NO_HIGHLIGHT=1
-            ((count++)) || true
-        fi
-    done
+	update_variables
+
+	_no_cmd
+
+	if ! command -v less &> /dev/null; then
+		if [ ${#missing_deps[@]} -ne 0 ]; then
+			missing_deps+=("${MESSAGES[and]} less")
+		else
+			missing_deps+=("less")
+		fi
+	fi
     
     if [ ${#missing_deps[@]} -ne 0 ]; then
         update_variables
@@ -257,12 +279,12 @@ highlight_code() {
         --force -- "${temp_file}" && rm -f "$temp_file" && return 0
     env COLORTERM=8bit bat --color=always --style="plain" \
         -- "${temp_file}" && rm -f "$temp_file" && return 0
+    # Attempt syntax highlighting with specified language
+    source-highlight -f esc -s "$lang" -i "$temp_file" 2>/dev/null && rm -f "$temp_file" && return 0
     pygmentize -f "${pygmentize_format}" -O "style=${PYGMENTIZE_STYLE:-autumn}"\
         -- "${temp_file}" && rm -f "$temp_file" && return 0
 
-    # Attempt syntax highlighting with specified language
-    source-highlight -f esc -s "$lang" -i "$temp_file" 2>/dev/null && rm -f "$temp_file" && return 0
-        printf "${COLOR_CODE}%s${COLOR_RESET}\n" "$content" && return 1
+	printf "${COLOR_CODE}%s${COLOR_RESET}\n" "$content" && return 1
 }
 
 # Function to generate line separator
@@ -274,7 +296,7 @@ line_shell() {
 fill_background() {
     local color="$1"
     local text="$2"
-    local cols=$(tput cols)
+    cols=$(tput cols)
     printf "${color}%-*s${COLOR_RESET}\n" "$cols" "$text"
 }
 
@@ -321,21 +343,27 @@ process_markdown() {
     [[ "$NO_LESS" == 1 ]] && pipe='cat'
     read -r -a cmd <<< "$pipe"
     
-    # Check if file exists
-    if [[ ! -f "$input_file" ]]; then
-        update_variables
-        echo -e "${MESSAGES[not_found]}"
-        show_help
+    # Check if input is from stdin (no file provided or file is '-')
+    if [[ -z "$input_file" || "$input_file" == "-" ]]; then
+        input_source="/dev/stdin"
+    else
+        # Check if file exists
+        if [[ ! -f "$input_file" ]]; then
+            update_variables
+            echo -e "${MESSAGES[not_found]}"
+            show_help
+        fi
+        input_source="$input_file"
     fi
     
-    # Read and process the markdown file line by line
+    # Read and process the markdown file or stdin line by line
     while IFS= read -r line || [ -n "$line" ]; do
 
         # Italic HTML tag
-        if [[ "$line" =~ \<i\>([^<]+)\<\/i\> ]]; then #[[ "$line" =~ \<i\>.*\<\/i\> ]] || 
+        if [[ "$line" =~ \<i\>([^<]+)\<\/i\> ]]; then #[[ "$line" =~ \<i\>.*\<\/i\> ]] ||
             detect_first_color
             line=$(echo -e "$line" | awk -v highlight="${COLOR_BULLET}" -v reset="${first_color}" '{gsub(/<i>([^<]*)<\/i>/, "<i>" highlight "&" reset "</i>")}1')
-        elif [[ "$line" =~ \<em\>([^<]+)\<\/em\> ]]; then #[[ "$line" =~ \<em\>.*\<\/em\> ]] ||
+        elif [[ "$line" =~ \<em\>([^<]+)\<\/em\> ]]; then
             detect_first_color
             line=$(echo -e "$line" | awk -v highlight="${COLOR_BULLET}" -v reset="${first_color}" '{gsub(/<em>([^<]*)<\/em>/, "<em>" highlight "&" reset "</em>")}1')
         fi
@@ -350,9 +378,9 @@ process_markdown() {
         if [[ "$line" =~ \*\*\<[^*]+\>\*\* ]] || [[ "$line" =~ \"\<[^*]+\>\" ]] || [[ "$line" =~ \'\<[^*]+\>\' ]] || [[ "$line" =~ \`\<[^*]+\>\` ]]; then
             true
         elif [[ "$line" =~ (.*)\<[^*]+\>(.*) ]]; then
+			# line="${line//<br>/}"
+			# line="${line//<\/br>/}"
             line=$(echo -e "$line" | sed 's/<[^>]*>//g')
-            # line="${line//<br>/}"
-            # line="${line//<\/br>/}"
         fi
 
         # Handle code blocks
@@ -448,7 +476,6 @@ process_markdown() {
             [[ "$NO_COLOR" == 1 || "$NO_CENTRALIZE" == 1 ]] && line=$(echo -e "${COLOR_TITLE1}" "${BASH_REMATCH[1]}")      
         fi
 
-        #if [[ "$line" =~ (.+)######[^#](.+)$ ]]; then
         if [[ "$line" =~ (.*)######(.*) ]]; then
             detect_first_color
             line=$(echo -e "$line" | awk -v bold="${COLOR_TITLE6}" -v reset="${first_color}" '{gsub(/######([^#]+)/, bold "&" reset)}1' | sed -E "s/######//g")
@@ -468,7 +495,7 @@ process_markdown() {
             line_shell  # Call line generation function
         # Handle Blockquotes
         elif [[ "$line" =~ ^\> ]]; then
-            echo -e "${COLOR_TITLE3}${line/\>/ \|}${COLOR_RESET}"
+            echo -e "${COLOR_TITLE3}${line/\>/ \│}${COLOR_RESET}"
         # Block code
         elif [[ "$line" =~ ^\ {3} ]]; then
             echo -e "${COLOR_CODE}${line//\   /}${COLOR_RESET}"
@@ -479,7 +506,7 @@ process_markdown() {
             echo -e "$line"    # Regular text
         fi
 
-    done < "$input_file" | "${cmd[@]}"
+    done < "$input_source" | "${cmd[@]}"
 }
 
 # Main function
@@ -533,20 +560,23 @@ main() {
     
     define_colors
 
-    # Check if file is provided
-    if [ -z "$MARKDOWN_FILE" ]; then
+	if [[ -z "$MARKDOWN_FILE" && ! -p /dev/stdin ]]; then
         update_variables
         echo -e "${MESSAGES[no_input]}"
         show_help
     fi
-    
+	
     # Check dependencies if syntax highlighting is enabled
     if [ -z "$NO_HIGHLIGHT" ]; then
         check_dependencies
     fi
-    
-    # Process the markdown file
-    process_markdown "$MARKDOWN_FILE"
+
+    # Process input from file or stdin
+    if [[ -z "$MARKDOWN_FILE" || "$MARKDOWN_FILE" == "-" ]]; then
+        process_markdown ""
+    else
+        process_markdown "$MARKDOWN_FILE"
+    fi
 }
 
 # Call main with all arguments and pipe to less with raw output
